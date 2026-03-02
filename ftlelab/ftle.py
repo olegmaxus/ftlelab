@@ -31,11 +31,15 @@ def _ensure_vec1d(y: torch.Tensor) -> torch.Tensor:
         return y.squeeze(0)
     return y
 
+def _dot(a: torch.Tensor, b: torch.Tensor) -> float:
+    return (a * b).sum()
+
 # ---------- Build f_K(x) ----------
 def _f_output(model: nn.Module):
     def f(x: torch.Tensor) -> torch.Tensor:
         model.eval()
-        return _ensure_vec1d(model(x))
+        y = model(x)
+        return y.reshape(()) if y.numel() == 1 else _ensure_vec1d(y)
     return f
 
 def _f_hidden_k_via_method(model: nn.Module, K: int):
@@ -111,7 +115,7 @@ def _jtj_mv(fun, x, v, backend="auto", fd_eps=1e-4):
         raise RuntimeError("Scalar feature in _jtj_mv; use grad-norm path.")
     jv = _jvp(fun, x, v, backend=backend, fd_eps=fd_eps)                  # [m]
     Av = torch.autograd.grad(y, x, grad_outputs=jv, retain_graph=True)[0] # [1, d] or [d]
-    return Av.squeeze(0)
+    return Av #.squeeze(0)
 
 def _normalize(v: torch.Tensor, eps=1e-12):
     n = v.norm()
@@ -124,16 +128,14 @@ def _jacobian_columns_by_jvp(fun, x, d, backend="auto", fd_eps=1e-4):
     """
     cols = []
     for i in range(d):
-        e = torch.zeros_like(x)
-        if x.ndim == 1:
-            e[i] = 1.0
-        else:  # [1, d]
-            e[0, i] = 1.0
+        e = torch.zeros_like(x).view(-1)
+        e[i] = 1.0
+        e = e.view_as(x)
         jv = _jvp(fun, x, e, backend=backend, fd_eps=fd_eps)
         if jv.ndim == 0:
             jv = jv.unsqueeze(0)
         cols.append(jv.detach())
-    J = torch.stack(cols, dim=1)  # [m, d]
+    J = torch.stack(cols, dim=1)
     return J
 
 def exact_svals_and_V(fun, x, backend="auto", fd_eps=1e-4):
@@ -160,7 +162,6 @@ def exact_svals_and_V(fun, x, backend="auto", fd_eps=1e-4):
     V = Vh.transpose(-2, -1)  # V:[d, k]
     return S, V
 
-
 # ---------- Top-1 and Top-2 ----------
 def top1_sigma(model: nn.Module,
                x: torch.Tensor,
@@ -171,11 +172,15 @@ def top1_sigma(model: nn.Module,
     """
     device = _device(model)
     x = x.to(device)
-    if x.ndim == 1: x = x.unsqueeze(0)  # [1, d]
+    
+    if x.ndim in (1, 3):
+        x = x.unsqueeze(0)
+
     fK = build_feature_fn(model, layer_spec)
 
     xr = x.detach().requires_grad_(True)
     y0 = fK(xr)
+
     # Scalar shortcut: σ1 = ||∇ f(x)||
     if y0.ndim == 0:
         g = torch.autograd.grad(y0, xr, retain_graph=False, create_graph=False)[0].reshape(-1)
@@ -183,14 +188,14 @@ def top1_sigma(model: nn.Module,
         v1 = (g / (g.norm() + 1e-12)).detach()
         return s1, v1
 
-    d = x.size(1)
+    d_total = x.detach().numel()
     # Exact for small d
-    if d <= cfg.exact_if_dim_le:
+    if d_total <= cfg.exact_if_dim_le:
         S, V = exact_svals_and_V(fK, xr, backend=cfg.jvp_backend, fd_eps=cfg.fd_eps)
         return float(S[0].item()), V[:, 0].detach()
 
     # Power iteration on A = J^T J
-    v = torch.randn(d, device=device); v, _ = _normalize(v)
+    v, _ = _normalize(torch.randn_like(xr)) # device and dtype of xr captured automatically
     last = None
     for _ in range(cfg.iters):
         Av = _jtj_mv(fK, xr, v, backend=cfg.jvp_backend, fd_eps=cfg.fd_eps)
@@ -198,7 +203,7 @@ def top1_sigma(model: nn.Module,
         # Rayleigh via ||J v||^2
         jv = _jvp(fK, xr, v, backend=cfg.jvp_backend, fd_eps=cfg.fd_eps)
         rq2 = float(jv.norm().item() ** 2)
-        if last is not None and abs(rq2 - last) < cfg.tol:
+        if last is not None and abs(rq2 - last) < cfg.tol * max(1.0, last):
             break
         last = rq2
     s1 = math.sqrt(max(last or 0.0, 0.0))
@@ -213,7 +218,9 @@ def top2_sigmas(model: nn.Module,
     """
     device = _device(model)
     x = x.to(device)
-    if x.ndim == 1: x = x.unsqueeze(0)
+    if x.ndim in (1, 3): 
+        x = x.unsqueeze(0)
+
     fK = build_feature_fn(model, layer_spec)
 
     xr = x.detach().requires_grad_(True)
@@ -226,9 +233,9 @@ def top2_sigmas(model: nn.Module,
         v1 = (g / (g.norm() + 1e-12)).detach()
         return s1, v1, 0.0, torch.zeros_like(v1)
 
-    d = x.size(1)
+    d_total = x.detach().numel()
     # Exact for small d
-    if d <= cfg.exact_if_dim_le:
+    if d_total <= cfg.exact_if_dim_le:
         S, V = exact_svals_and_V(fK, xr, backend=cfg.jvp_backend, fd_eps=cfg.fd_eps)
         s1 = float(S[0].item()); v1 = V[:, 0].detach()
         s2 = float(S[1].item()) if S.numel() > 1 else 0.0
@@ -240,19 +247,19 @@ def top2_sigmas(model: nn.Module,
     if s1 < 1e-12:
         return 0.0, v1, 0.0, torch.zeros_like(v1)
 
-    v = torch.randn(d, device=device)
-    v = v - (v @ v1) * v1        # orthogonalize to v1
+    v = torch.randn_like(xr)
+    v = v - _dot(v, v1) * v1        # orthogonalize to v1
     v, _ = _normalize(v)
     last = None
 
     for _ in range(cfg.iters):
         Av = _jtj_mv(fK, xr, v, backend=cfg.jvp_backend, fd_eps=cfg.fd_eps)
-        Av_defl = Av - (s1**2) * (v1 @ v) * v1
-        Av_defl = Av_defl - (Av_defl @ v1) * v1  # re-orthogonalize
+        Av_defl = Av - (s1 ** 2) * _dot(v1, v) * v1
+        Av_defl = Av_defl - _dot(Av_defl, v1) * v1  # re-orthogonalize
         v, _ = _normalize(Av_defl)
         jv = _jvp(fK, xr, v, backend=cfg.jvp_backend, fd_eps=cfg.fd_eps)
         rq2 = float(jv.norm().item() ** 2)
-        if last is not None and abs(rq2 - last) < cfg.tol:
+        if last is not None and abs(rq2 - last) < cfg.tol * max(1.0, last):
             break
         last = rq2
 

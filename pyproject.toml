@@ -1,0 +1,29 @@
+[project]
+name = "ftlelab"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "ipykernel>=7.2.0",
+    "ipython>=8.39.0",
+    "jax[cuda12]>=0.6.2",
+    "jupyter>=1.1.1",
+    "matplotlib>=3.10.8",
+    "numpy>=2.2.6",
+    "scikit-learn>=1.7.2",
+    "torch>=2.11.0",
+    "torchaudio>=2.11.0",
+    "torchvision>=0.26.0",
+    "tqdm>=4.66.5",
+]
+
+[[tool.uv.index]]
+url = "https://download.pytorch.org/whl/cu128"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

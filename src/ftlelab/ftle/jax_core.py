@@ -1,10 +1,10 @@
+import functools
 from typing import Any, Callable, Dict, Tuple, Union
 
 import numpy as np
 import jax
 import jax.numpy as jnp
 from tqdm.auto import tqdm
-
 
 from .jax_models import dense_forward, dense_hidden_k
 
@@ -14,7 +14,6 @@ from .jax_models import dense_forward, dense_hidden_k
 # ============================================================
 
 LayerSpec = Union[str, Tuple[str, int]]  # "output" or ("hidden_k", K)
-
 
 # ============================================================
 # Feature function builder (JAX)
@@ -58,7 +57,6 @@ def build_feature_fn_jax(
         ...
 
     raise ValueError(f"Unknown model_type: {model_type}")
-
 
 # ============================================================
 # JVP/VJP helper: (J^T J) v
@@ -235,6 +233,45 @@ def topk_singular_values_jax(
     return sigmas
 
 # ============================================================
+# JIT cache — keyed on (model_type, layer_spec, activation,
+#              output_activation, max_steps, jax_dtype_str)
+# ============================================================
+
+_FTLE_JIT_CACHE : Dict[tuple, callable] = {}
+
+def _get_ftle_batch_fn(
+    model_type: str,
+    params: Dict[str, Any],
+    layer_spec: LayerSpec,
+    *,
+    activation: str,
+    output_activation: str,
+    max_steps: int,
+    jax_dtype,
+) -> Callable:
+    cache_key = (model_type, layer_spec, activation,
+                 output_activation, max_steps, jax_dtype)
+    
+    if cache_key not in _FTLE_JIT_CACHE:
+        f = build_feature_fn_jax(
+            model_type=model_type,
+            params=params,
+            layer_spec=layer_spec,
+            activation=activation, 
+            output_activation=output_activation,
+        )
+
+        def ftle_single(x):
+            x = x.astype(jax_dtype)
+            sigmas = topk_singular_values_jax(f, x, k=1, max_steps=max_steps)
+            lam = jnp.log(jnp.maximum(sigmas[0], jnp.array(1e-12, dtype=jax_dtype)))
+            return lam
+        
+        _FTLE_JIT_CACHE[cache_key] = jax.jit(jax.vmap(ftle_single))
+
+    return _FTLE_JIT_CACHE[cache_key]
+
+# ============================================================
 # FTLE (maximal, k=1) at a single point
 # ============================================================
 
@@ -251,7 +288,7 @@ def ftle_at_point(
     max_steps: int = 50,
 ) -> jnp.ndarray:
     """
-    Compute maximal FTLE λ_1(x) = (1/L) log σ_1(J_f(x)) for the layer
+    Compute maximal FTLE lambda_1(x) = (1/L) log sigma_1(J_f(x)) for the layer
     specified by (model_type, layer_spec).
 
     model_type: "dense" | "conv" | ...
@@ -282,7 +319,7 @@ def ftle_at_point(
 def ftle_field(
     model_type: str,
     params: Dict[str, Any],
-    X: jnp.ndarray,           # (N, d)
+    X: jnp.ndarray, # (N, d)
     layer_spec: LayerSpec,
     time_L: int,
     *,
@@ -291,26 +328,24 @@ def ftle_field(
     max_steps: int = 50,
 ) -> jnp.ndarray:
     """
-    Compute maximal FTLE λ_1(x) at all x in X.
+    Compute maximal FTLE lambda_1(x) at all x in X in one vectorized call.
+    Caller is responsible for setting jax.config.update("jax_enable_x64", ...)
+    before the first call if float64 is needed.
 
     Returns:
       lam: (N,) array of FTLE values
     """
-    def ftle_single(x):
-        return ftle_at_point(
-            model_type,
-            params,
-            x,
-            layer_spec,
-            time_L,
-            activation=activation,
-            output_activation=output_activation,
-            max_steps=max_steps,
-        )
 
-    ftle_vmapped = jax.jit(jax.vmap(ftle_single))
-    return ftle_vmapped(X)
+    jax_dtype = X.dtype
+    ftle_batch = _get_ftle_batch_fn(
+        model_type=model_type, params=params,
+        layer_spec=layer_spec, activation=activation,
+        output_activation=output_activation, max_steps=max_steps,
+        jax_dtype=jax_dtype,
+    )
 
+    raw = ftle_batch(X)
+    return raw / max(int(time_L), 1)
 
 def ftle_field_batched(
     model_type,
@@ -323,38 +358,26 @@ def ftle_field_batched(
     output_activation: str = "tanh",
     max_steps: int = 50,
     tol: float = 1e-6,
-    dtype: str = "float64", # float32 or float64
+    dtype: str = "float32", # float32 or float64
 ) -> np.ndarray:
     """
     Compute FTLE over X_np in batches, showing tqdm progress.
+
+    Caller is responsible for setting jax.config.update("jax_enable_x64", ...)
+    before the first call if float64 is needed.
+
     Returns FTLE values as a numpy array of shape (N,).
     """
+    if dtype not in ("float32", "float64"):
+        raise ValueError("dtype must be 'float32' or 'float64'.")
+    jax_dtype = jnp.float64 if dtype == "float64" else jnp.float32
 
-    if dtype == "float64":
-        jax.config.update("jax_enable_x64", True)
-        jax_dtype = jnp.float64
-    elif dtype == "float32":
-        jax.config.update("jax_enable_x64", False)
-        jax_dtype = jnp.float32
-    else:
-        raise ValueError("Unsupported dtype: choose 'float32' or 'float64'.")
-    
-    # Single-point FTLE (pure JAX)
-    def ftle_single(x):
-        x = x.astype(jax_dtype)
-        return ftle_at_point(
-            model_type=model_type,
-            params=params,
-            x=x,
-            layer_spec=layer_spec,
-            time_L=time_L,
-            activation=activation,
-            output_activation=output_activation,
-            max_steps=max_steps,
-        )
-
-    # Batched version
-    ftle_batch = jax.jit(jax.vmap(ftle_single))
+    ftle_batch = _get_ftle_batch_fn(
+        model_type=model_type, params=params,
+        layer_spec=layer_spec, activation=activation,
+        output_activation=output_activation, max_steps=max_steps,
+        jax_dtype=jax_dtype,
+    )    
 
     N = X_np.shape[0]
     out = np.empty((N,), dtype=np.float32)

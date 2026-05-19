@@ -37,20 +37,17 @@ def _dot(a: torch.Tensor, b: torch.Tensor) -> float:
 # ---------- Build f_K(x) ----------
 def _f_output(model: nn.Module):
     def f(x: torch.Tensor) -> torch.Tensor:
-        model.eval()
         y = model(x)
         return y.reshape(()) if y.numel() == 1 else _ensure_vec1d(y)
     return f
 
 def _f_hidden_k_via_method(model: nn.Module, K: int):
     def f(x: torch.Tensor) -> torch.Tensor:
-        model.eval()
         return _ensure_vec1d(model.hidden_k(x, K))  # post-activation helper
     return f
 
 def _f_hidden_k_via_hooks(model: nn.Module, K: int):
     def f(x: torch.Tensor) -> torch.Tensor:
-        model.eval()
         cap = {"t": None}; cnt = {"n": 0}
         def hook(_m, _inp, out):
             if isinstance(_m, _ACTS):
@@ -70,6 +67,7 @@ def _f_hidden_k_via_hooks(model: nn.Module, K: int):
     return f
 
 def build_feature_fn(model: nn.Module, layer_spec: LayerSpec):
+    model.eval()
     if layer_spec == "output":
         return _f_output(model)
     if isinstance(layer_spec, tuple) and layer_spec[0] == "hidden_k":

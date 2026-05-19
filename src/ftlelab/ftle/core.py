@@ -113,9 +113,9 @@ def _jtj_mv(fun, x, v, backend="auto", fd_eps=1e-4):
         raise RuntimeError("Scalar feature in _jtj_mv; use grad-norm path.")
     jv = _jvp(fun, x, v, backend=backend, fd_eps=fd_eps)                  # [m]
     Av = torch.autograd.grad(y, x, grad_outputs=jv, retain_graph=True)[0] # [1, d] or [d]
-    return Av.squeeze(0)
+    return Av.reshape(-1)
 
-def _orthonormalize_columns(X: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
+def _orthonormalize_columns(X: torch.Tensor) -> torch.Tensor:
     if X.ndim == 1:
         X = X.unsqueeze(1)
     Q, R = torch.linalg.qr(X, mode="reduced")
@@ -131,7 +131,6 @@ def _jacobian_columns_by_jvp(fun, x, d, backend="auto", fd_eps=1e-4):
     Build J ∈ R^{m x d} column-wise: J e_i = JVP(fun, x, e_i) with e_i shaped like x.
     """
     if backend in ("auto", "torch") and _HAS_TORCH_FUNC and hasattr(torch.func, "vmap"):
-        x_flat = x.reshape(-1)
         I = torch.eye(d, device=x.device, dtype=x.dtype)
 
         def single_jvp(v_flat):
@@ -303,7 +302,7 @@ def _top2_sigmas_from_fn(
         cols = [
             _jtj_mv(fK, xr, V[:, j].view_as(xr),
                     backend=cfg.jvp_backend,
-                    fd_eps=cfg.fd_eps).reshape(-1)
+                    fd_eps=cfg.fd_eps)
             for j in range(2)
         ]
 
@@ -322,7 +321,7 @@ def _top2_sigmas_from_fn(
     cols = [
         _jtj_mv(fK, xr, V[:, j].view_as(xr),
                 backend=cfg.jvp_backend,
-                fd_eps=cfg.fd_eps).reshape(-1)
+                fd_eps=cfg.fd_eps)
         for j in range(2)
     ]
 
@@ -334,8 +333,7 @@ def _top2_sigmas_from_fn(
 
     return (
         float(sigmas[0].item()), V[:, 0].detach(),
-        float(sigmas[1].item()), V[:, 1].detach(),
-    )
+        float(sigmas[1].item()), V[:, 1].detach())
 
 
 def top2_sigmas(model: nn.Module,
@@ -382,8 +380,7 @@ def top2_sigma_batch(
 
     return (
         torch.tensor(sigmas1, dtype=torch.float32, device=device),
-        torch.tensor(sigmas2, dtype=torch.float32, device=device),
-    )
+        torch.tensor(sigmas2, dtype=torch.float32, device=device))
 
 def topk_sigmas(
     model: nn.Module,
@@ -468,7 +465,7 @@ def topk_sigmas(
         lambda_1 = float(eigvals_approx[0].item())
 
         if last is not None:
-            if abs(lambda_1 - last) < cfg.tol * max(1.0, last):
+            if abs(lambda_1 - last) < cfg.tol * max(1.0, abs(last)):
                 V = V_new
                 break
         V = V_new

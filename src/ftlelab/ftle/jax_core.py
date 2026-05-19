@@ -77,10 +77,6 @@ def jtj_mv(
     return: (d,)
     """
 
-    dtype = x.dtype
-    x = x.astype(dtype)
-    v = v.astype(dtype)
-
     # J v
     _, Jv = jax.jvp(f, (x,), (v,))
     # J^T (J v)
@@ -247,12 +243,14 @@ def _get_ftle_batch_fn(
     activation: str,
     output_activation: str,
     max_steps: int,
+    tol: float,
     jax_dtype,
     params_key=None, # manual or generated
 ) -> Callable:
     cache_key = (params_key if params_key is not None else id(params),
                  model_type, layer_spec, activation,
-                 output_activation, max_steps, str(jax_dtype))
+                 output_activation, max_steps, 
+                 float(tol), str(jax_dtype))
     
     if cache_key not in _FTLE_JIT_CACHE:
         f = build_feature_fn_jax(
@@ -265,7 +263,8 @@ def _get_ftle_batch_fn(
 
         def ftle_single(x, time_L):
             x = x.astype(jax_dtype)
-            sigmas = topk_singular_values_jax(f, x, k=1, max_steps=max_steps)
+            sigmas = topk_singular_values_jax(f, x, k=1, tol=tol,
+                                              max_steps=max_steps)
             sigma_1 = sigmas[0]
 
             return (1.0 / jnp.maximum(time_L, 1)) * jnp.log(jnp.maximum(sigma_1, 1e-12))
@@ -289,6 +288,7 @@ def ftle_at_point(
     activation: str = "tanh",
     output_activation: str = "tanh",
     max_steps: int = 50,
+    tol: float = 1e-6,
 ) -> jnp.ndarray:
     """
     Compute maximal FTLE lambda_1(x) = (1/L) log sigma_1(J_f(x)) for the layer
@@ -308,7 +308,7 @@ def ftle_at_point(
         output_activation=output_activation,
     )
 
-    sigmas = topk_singular_values_jax(f, x, k=1, max_steps=max_steps)
+    sigmas = topk_singular_values_jax(f, x, k=1, max_steps=max_steps, tol=tol)
     sigma1 = sigmas[0]
     lam = (1.0 / max(int(time_L), 1)) * jnp.log(jnp.maximum(sigma1, 1e-12))
     return lam
@@ -329,6 +329,7 @@ def ftle_field(
     activation: str = "tanh",
     output_activation: str = "tanh",
     max_steps: int = 50,
+    tol: float = 1e-6,
 ) -> jnp.ndarray:
     """
     Compute maximal FTLE lambda_1(x) at all x in X in one vectorized call.
@@ -344,7 +345,7 @@ def ftle_field(
         model_type=model_type, params=params,
         layer_spec=layer_spec, activation=activation,
         output_activation=output_activation, max_steps=max_steps,
-        jax_dtype=jax_dtype,
+        tol=tol, jax_dtype=jax_dtype,
     )
 
     return ftle_batch(X, time_L)
@@ -359,6 +360,7 @@ def ftle_field_batched(
     activation: str = "tanh",
     output_activation: str = "tanh",
     max_steps: int = 50,
+    tol: float = 1e-6,
     dtype: str = "float32", # float32 or float64
 ) -> np.ndarray:
     """
@@ -377,7 +379,7 @@ def ftle_field_batched(
         model_type=model_type, params=params,
         layer_spec=layer_spec, activation=activation,
         output_activation=output_activation, max_steps=max_steps,
-        jax_dtype=jax_dtype,
+        tol=tol, jax_dtype=jax_dtype,
     )    
 
     N = X_np.shape[0]

@@ -158,7 +158,7 @@ def topk_singular_values_jax(
     key: jax.Array | None = None,
 ) -> jnp.ndarray:
     """
-    Approximate top-k singular values σ_1..σ_k of J_f(x) via block power
+    Approximate top-k singular values sigma_1..sigma_k of J_f(x) via block power
     iteration on A = J^T J, with a convergence check based on the leading
     eigenvalue estimate (≈ ||J v||^2).
 
@@ -248,9 +248,11 @@ def _get_ftle_batch_fn(
     output_activation: str,
     max_steps: int,
     jax_dtype,
+    params_key=None, # manual or generated
 ) -> Callable:
-    cache_key = (model_type, layer_spec, activation,
-                 output_activation, max_steps, jax_dtype)
+    cache_key = (params_key if params_key is not None else id(params),
+                 model_type, layer_spec, activation,
+                 output_activation, max_steps, str(jax_dtype))
     
     if cache_key not in _FTLE_JIT_CACHE:
         f = build_feature_fn_jax(
@@ -261,13 +263,14 @@ def _get_ftle_batch_fn(
             output_activation=output_activation,
         )
 
-        def ftle_single(x):
+        def ftle_single(x, time_L):
             x = x.astype(jax_dtype)
             sigmas = topk_singular_values_jax(f, x, k=1, max_steps=max_steps)
-            lam = jnp.log(jnp.maximum(sigmas[0], jnp.array(1e-12, dtype=jax_dtype)))
-            return lam
+            sigma_1 = sigmas[0]
+
+            return (1.0 / jnp.maximum(time_L, 1)) * jnp.log(jnp.maximum(sigma_1, 1e-12))
         
-        _FTLE_JIT_CACHE[cache_key] = jax.jit(jax.vmap(ftle_single))
+        _FTLE_JIT_CACHE[cache_key] = jax.jit(jax.vmap(ftle_single, in_axes=(0, None)))
 
     return _FTLE_JIT_CACHE[cache_key]
 
@@ -344,8 +347,7 @@ def ftle_field(
         jax_dtype=jax_dtype,
     )
 
-    raw = ftle_batch(X)
-    return raw / max(int(time_L), 1)
+    return ftle_batch(X, time_L)
 
 def ftle_field_batched(
     model_type,
@@ -357,7 +359,6 @@ def ftle_field_batched(
     activation: str = "tanh",
     output_activation: str = "tanh",
     max_steps: int = 50,
-    tol: float = 1e-6,
     dtype: str = "float32", # float32 or float64
 ) -> np.ndarray:
     """
@@ -384,8 +385,8 @@ def ftle_field_batched(
 
     for start in tqdm(range(0, N, batch_size), desc="FTLE (JAX)"):
         end = min(start + batch_size, N)
-        X_batch = jnp.asarray(X_np[start:end])      # (B, d)
-        lam_batch = np.array(ftle_batch(X_batch))  # back to numpy
+        X_batch = jnp.asarray(X_np[start:end], dtype=jax_dtype)      # (B, d)
+        lam_batch = np.array(ftle_batch(X_batch, time_L))  # back to numpy
         out[start:end] = lam_batch.astype(np.float32)
 
     return out

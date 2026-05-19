@@ -113,7 +113,7 @@ def _jtj_mv(fun, x, v, backend="auto", fd_eps=1e-4):
         raise RuntimeError("Scalar feature in _jtj_mv; use grad-norm path.")
     jv = _jvp(fun, x, v, backend=backend, fd_eps=fd_eps)                  # [m]
     Av = torch.autograd.grad(y, x, grad_outputs=jv, retain_graph=True)[0] # [1, d] or [d]
-    return Av #.squeeze(0)
+    return Av.squeeze(0)
 
 def _orthonormalize_columns(X: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
     if X.ndim == 1:
@@ -130,6 +130,20 @@ def _jacobian_columns_by_jvp(fun, x, d, backend="auto", fd_eps=1e-4):
     """
     Build J ∈ R^{m x d} column-wise: J e_i = JVP(fun, x, e_i) with e_i shaped like x.
     """
+    if backend in ("auto", "torch") and _HAS_TORCH_FUNC and hasattr(torch.func, "vmap"):
+        x_flat = x.reshape(-1)
+        I = torch.eye(d, device=x.device, dtype=x.dtype)
+
+        def single_jvp(v_flat):
+            v = v_flat.view_as(x)
+            jv = _jvp(fun, x, v, backend=backend, fd_eps=fd_eps)
+            if jv.ndim == 0:
+                jv = jv.unsqueeze(0)
+            return jv.reshape(-1)
+
+        J_cols = torch.func.vmap(single_jvp)(I) # [d, m]
+        return J_cols.transpose(0, 1).contiguous() # [m, d]
+    
     cols = []
     for i in range(d):
         e = torch.zeros_like(x).view(-1)
@@ -138,7 +152,7 @@ def _jacobian_columns_by_jvp(fun, x, d, backend="auto", fd_eps=1e-4):
         jv = _jvp(fun, x, e, backend=backend, fd_eps=fd_eps)
         if jv.ndim == 0:
             jv = jv.unsqueeze(0)
-        cols.append(jv.detach())
+        cols.append(jv.detach().reshape(-1))
     J = torch.stack(cols, dim=1)
     return J
 
@@ -320,7 +334,7 @@ def _top2_sigmas_from_fn(
 
     return (
         float(sigmas[0].item()), V[:, 0].detach(),
-        float(sigmas[1].item(), V[:, 1].detach())
+        float(sigmas[1].item()), V[:, 1].detach(),
     )
 
 

@@ -167,44 +167,36 @@ def exact_svals_and_V(fun, x, backend="auto", fd_eps=1e-4):
     return S, V
 
 # ---------- Top-1 and Top-2 ----------
-def top1_sigma(model: nn.Module,
-               x: torch.Tensor,
-               layer_spec: LayerSpec,
-               cfg: SVConfig = SVConfig()) -> Tuple[float, torch.Tensor]:
+def _top1_sigma_from_fn(
+    fK: callable,
+    x: torch.Tensor,
+    cfg: SVConfig = SVConfig(),
+):
     """
-    Return (σ1, v1) for J_K at input x.
+    Core of top1_sigma: operates on an already-built feature function fK.
     """
-    device = _device(model)
-    x = x.to(device)
-    
-    if x.ndim in (1, 3):
-        x = x.unsqueeze(0)
-
-    fK = build_feature_fn(model, layer_spec)
-
     xr = x.detach().requires_grad_(True)
     y0 = fK(xr)
 
-    # Scalar shortcut: σ1 = ||∇ f(x)||
+    # Scalar shortcut: sigma_1 = \|\grad f(x)\|
     if y0.ndim == 0:
         g = torch.autograd.grad(y0, xr, retain_graph=False, create_graph=False)[0].reshape(-1)
         s1 = float(g.norm().item())
         v1 = (g / (g.norm() + 1e-12)).detach()
         return s1, v1
-
+    
     d_total = x.detach().numel()
-    # Exact for small d
-    if d_total <= cfg.exact_if_dim_le:
+    if d_total <= cfg.exact_if_dim_le: # if dimension is small enough, just do exact SVD
         S, V = exact_svals_and_V(fK, xr, backend=cfg.jvp_backend, fd_eps=cfg.fd_eps)
         return float(S[0].item()), V[:, 0].detach()
 
-    # Power iteration on A = J^T J
-    v, _ = _normalize(torch.randn_like(xr)) # device and dtype of xr captured automatically
+
+    # Power iteration on J^\top J
+    v, _ = _normalize(torch.randn_like(xr)) # device and dtype of xr are captured automatically
     last = None
     for _ in range(cfg.iters):
         Av = _jtj_mv(fK, xr, v, backend=cfg.jvp_backend, fd_eps=cfg.fd_eps)
         v, _ = _normalize(Av)
-        # Rayleigh via ||J v||^2
         jv = _jvp(fK, xr, v, backend=cfg.jvp_backend, fd_eps=cfg.fd_eps)
         rq2 = float(jv.norm().item() ** 2)
         if last is not None and abs(rq2 - last) < cfg.tol * max(1.0, last):
@@ -212,6 +204,25 @@ def top1_sigma(model: nn.Module,
         last = rq2
     s1 = math.sqrt(max(last or 0.0, 0.0))
     return s1, v.detach()
+
+
+def top1_sigma(
+    model: nn.Module,
+    x: torch.Tensor,
+    layer_spec: LayerSpec,
+    cfg: SVConfig = SVConfig(),
+) -> Tuple[float, torch.Tensor]:
+    """
+    Return (sigma_1, v_1) for J_K at input x.
+    """
+    device = _device(model)
+    x = x.to(device)
+
+    if x.ndim in (1, 3):
+        x = x.unsqueeze(0)  # [1, d] / [1, C, H, W]
+
+    fK = build_feature_fn(model, layer_spec)
+    return _top1_sigma_from_fn(fK, x, cfg)
 
 
 def top1_sigma_batch(
@@ -235,7 +246,9 @@ def top1_sigma_batch(
 
     sigmas = []
     for x in X:
-        s1, _ = top1_sigma(model, x, layer_spec, cfg)
+        if x.ndim in (1, 3):
+            x = x.unsqueeze(0)
+        s1, _ = _top_1_sigma_from_fn(fK, x, cfg) # top1_sigma(model, x, layer_spec, cfg)
         sigmas.append(s1)
 
     return torch.tensor(sigmas, dtype=torch.float32, device=device)

@@ -95,55 +95,31 @@ def orthonormalize(V: jnp.ndarray) -> jnp.ndarray:
     Q, _ = jnp.linalg.qr(V)
     return Q
 
-
 # ============================================================
 # Top-k singular values (values only) via block power iteration
 # ============================================================
 
+def exact_singular_values_jax(
+    f: Callable[[jnp.ndarray], jnp.ndarray],
+    x: jnp.ndarray,
+    k: int,
+) -> jnp.ndarray:
+    y = f(x)
 
-# def topk_singular_values_jax(
-#     f: Callable[[jnp.ndarray], jnp.ndarray],
-#     x: jnp.ndarray,
-#     k: int = 1,
-#     n_steps: int = 20,
-#     key: jax.Array | None = None,
-# ) -> jnp.ndarray:
-#     """
-#     Approximate top-k singular values σ_1..σ_k of J_f(x) via block power
-#     iteration on A = J^T J.
-
-#     f: R^d -> R^m
-#     x: (d,)
-#     k: number of singular values to approximate
-#     n_steps: number of power iterations
-#     returns: sigmas: (k,) sorted in descending order
-#     """
-#     d = x.shape[0]
-#     if key is None:
-#         key = jax.random.PRNGKey(0)
-
-#     # Random initial subspace
-#     V = jax.random.normal(key, (d, k))
-#     V = orthonormalize(V)
-
-#     def body(V, _):
-#         # Apply A = J^T J to each column of V
-#         Z_cols = [jtj_mv(f, x, V[:, j]) for j in range(k)]
-#         Z = jnp.stack(Z_cols, axis=1)  # (d, k)
-#         V_new = orthonormalize(Z)
-#         return V_new, None
-
-#     V_final, _ = jax.lax.scan(body, V, None, length=n_steps)
-
-#     # Form Rayleigh matrix B = V^T (A V)
-#     Z_cols = [jtj_mv(f, x, V_final[:, j]) for j in range(k)]
-#     Z = jnp.stack(Z_cols, axis=1)         # (d, k)
-#     B = V_final.T @ Z                     # (k, k)
-
-#     eigvals = jnp.linalg.eigvalsh(B)      # ascending
-#     eigvals = jnp.sort(eigvals)[::-1]     # descending
-#     sigmas = jnp.sqrt(jnp.clip(eigvals, a_min=0.0))
-#     return sigmas
+    if y.ndim == 0:
+        g = jax.grad(f)(x).reshape(-1)
+        s1 = jnp.linalg.norm(g)
+        out = jnp.zeros((k,), dtype=x.dtype)
+        out = out.at[0].set(s1)
+        return out
+    
+    J = jax.jacfwd(f)(x)
+    J = J.reshape(-1, x.size)
+    s = jnp.linalg.svd(J, full_matrices=False, compute_uv=False)
+    k_eff = min(k, s.shape[0])
+    out = jnp.zeros((k,), dtype=s.dtype)
+    out = out.at[:k_eff].set(s[:k_eff])
+    return out
 
 def topk_singular_values_jax(
     f: Callable[[jnp.ndarray], jnp.ndarray],
@@ -151,6 +127,7 @@ def topk_singular_values_jax(
     k: int = 1,
     max_steps: int = 50,
     tol: float = 1e-6,
+    exact_if_dim_le: int = 4,
     key: jax.Array | None = None,
 ) -> jnp.ndarray:
     """
@@ -166,6 +143,10 @@ def topk_singular_values_jax(
     returns: sigmas: (k,) sorted in descending order
     """
     d = x.shape[0]
+
+    if d <= exact_if_dim_le:
+        return exact_singular_values_jax(f, x, k)
+
     if key is None:
         key = jax.random.PRNGKey(0)
 
@@ -243,6 +224,7 @@ def _get_ftle_batch_fn(
     activation: str,
     output_activation: str,
     max_steps: int,
+    exact_if_dim_le: int,
     tol: float,
     jax_dtype,
     params_key=None, # manual or generated
@@ -250,7 +232,7 @@ def _get_ftle_batch_fn(
     cache_key = (params_key if params_key is not None else id(params),
                  model_type, layer_spec, activation,
                  output_activation, max_steps, 
-                 float(tol), str(jax_dtype))
+                 float(tol), int(exact_if_dim_le), str(jax_dtype))
     
     if cache_key not in _FTLE_JIT_CACHE:
         f = build_feature_fn_jax(
@@ -264,7 +246,8 @@ def _get_ftle_batch_fn(
         def ftle_single(x, time_L):
             x = x.astype(jax_dtype)
             sigmas = topk_singular_values_jax(f, x, k=1, tol=tol,
-                                              max_steps=max_steps)
+                                              max_steps=max_steps,
+                                              exact_if_dim_le=exact_if_dim_le)
             sigma_1 = sigmas[0]
 
             return (1.0 / jnp.maximum(time_L, 1)) * jnp.log(jnp.maximum(sigma_1, 1e-12))
@@ -328,6 +311,7 @@ def ftle_field(
     *,
     activation: str = "tanh",
     output_activation: str = "tanh",
+    exact_if_dim_le: int = 4,
     max_steps: int = 50,
     tol: float = 1e-6,
 ) -> jnp.ndarray:
@@ -345,7 +329,7 @@ def ftle_field(
         model_type=model_type, params=params,
         layer_spec=layer_spec, activation=activation,
         output_activation=output_activation, max_steps=max_steps,
-        tol=tol, jax_dtype=jax_dtype,
+        tol=tol, exact_if_dim_le=exact_if_dim_le, jax_dtype=jax_dtype,
     )
 
     return ftle_batch(X, time_L)
@@ -359,6 +343,7 @@ def ftle_field_batched(
     batch_size: int = 1024,
     activation: str = "tanh",
     output_activation: str = "tanh",
+    exact_if_dim_le: int = 4,
     max_steps: int = 50,
     tol: float = 1e-6,
     dtype: str = "float32", # float32 or float64
@@ -378,8 +363,8 @@ def ftle_field_batched(
     ftle_batch = _get_ftle_batch_fn(
         model_type=model_type, params=params,
         layer_spec=layer_spec, activation=activation,
-        output_activation=output_activation, max_steps=max_steps,
-        tol=tol, jax_dtype=jax_dtype,
+        output_activation=output_activation, exact_if_dim_le=exact_if_dim_le,
+        max_steps=max_steps, tol=tol, jax_dtype=jax_dtype,
     )    
 
     N = X_np.shape[0]

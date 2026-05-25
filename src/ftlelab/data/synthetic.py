@@ -7,7 +7,7 @@ import math
 TensorPair = Tuple[torch.Tensor, torch.Tensor]
 
 def make_moons_dataset(
-    n_samples: int = 10000,
+    num_samples: int = 10000,
     noise_std: float = 0.05,
     seed: int | None = 123,
     shuffle: bool = True,
@@ -17,8 +17,8 @@ def make_moons_dataset(
     if seed is not None:
         set_seed(seed)
 
-    n_plus = n_samples // 2
-    n_minus = n_samples - n_plus
+    n_plus = num_samples // 2
+    n_minus = num_samples - n_plus
 
     t_plus = torch.rand(n_plus) * math.pi
     t_minus = torch.rand(n_minus) * math.pi
@@ -108,7 +108,7 @@ def make_spiral_dataset(
     
     X = (X - X.mean(0)) / X.std(0)
     
-    return X, y
+    return X, y.reshape(-1, 1)
 
 
 def make_xor_dataset(

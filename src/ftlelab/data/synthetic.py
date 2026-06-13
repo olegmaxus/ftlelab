@@ -73,7 +73,7 @@ def make_circle_dataset(
         valid_mask = inside_mask | outside_mask
 
         X_valid = X_batch[valid_mask]
-        y_valid = torch.where(inside_mask[valid_mask] < radius, 1., -1.).reshape(-1, 1)
+        y_valid = torch.where(inside_mask[valid_mask],  1., -1.).reshape(-1, 1)
         
         X_list.append(X_valid)
         y_list.append(y_valid)

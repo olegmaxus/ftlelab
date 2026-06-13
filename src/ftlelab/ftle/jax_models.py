@@ -26,6 +26,7 @@ def dense_forward(
         "tanh": jnp.tanh,
         "relu": jax.nn.relu,
         "gelu": jax.nn.gelu,
+        "leaky_relu": jax.nn.leaky_relu,
         "identity": lambda z: z,
     }
     act = acts[activation]
@@ -58,6 +59,7 @@ def dense_hidden_k(
         "tanh": jnp.tanh,
         "relu": jax.nn.relu,
         "gelu": jax.nn.gelu,
+        "leaky_relu": jax.nn.leaky_relu,
         "identity": lambda z: z,
     }
     act = acts[activation]

@@ -7,7 +7,7 @@ import math
 TensorPair = Tuple[torch.Tensor, torch.Tensor]
 
 def make_moons_dataset(
-    n_samples: int = 10000,
+    num_samples: int = 10000,
     noise_std: float = 0.05,
     seed: int | None = 123,
     shuffle: bool = True,
@@ -17,8 +17,8 @@ def make_moons_dataset(
     if seed is not None:
         set_seed(seed)
 
-    n_plus = n_samples // 2
-    n_minus = n_samples - n_plus
+    n_plus = num_samples // 2
+    n_minus = num_samples - n_plus
 
     t_plus = torch.rand(n_plus) * math.pi
     t_minus = torch.rand(n_minus) * math.pi
@@ -48,15 +48,39 @@ def make_moons_dataset(
 
 
 def make_circle_dataset(
-    num_samples=10000, 
-    radius=0.5, 
-    noise_std=0.01, 
-    seed=123
+    num_samples: int = 10000,
+    radius: float = 0.5,
+    noise_std: float = 0.01, 
+    seed: int = 123,
+    margin: float = 0.0,
 ) -> TensorPair:
     set_seed(seed)
 
-    X = torch.rand(num_samples, 2) * 8 * radius - 4 * radius 
-    y = (torch.where(torch.linalg.norm(X, dim=1) < math.sqrt(2 * radius), 1., -1.)).reshape(-1, 1)
+    half_margin = margin / 2.0
+    extent = 2.0 * radius
+    X_list = []
+    y_list = []
+    collected = 0
+
+    while collected < num_samples:
+        batch_size = num_samples - collected + int(0.2 * num_samples)
+        X_batch = (torch.rand(batch_size, 2) * 2 - 1) * extent
+
+        distance = torch.linalg.norm(X_batch, dim=1)
+
+        inside_mask = distance < (radius - half_margin)
+        outside_mask = distance > (radius + half_margin)
+        valid_mask = inside_mask | outside_mask
+
+        X_valid = X_batch[valid_mask]
+        y_valid = torch.where(inside_mask[valid_mask],  1., -1.).reshape(-1, 1)
+        
+        X_list.append(X_valid)
+        y_list.append(y_valid)
+        collected += X_valid.size(0)
+
+    X = torch.cat(X_list, dim=0)[:num_samples]
+    y = torch.cat(y_list, dim=0)[:num_samples]
 
     if noise_std and noise_std > 0.0:
         X = X + torch.normal(0, noise_std, size=X.shape)
@@ -65,9 +89,9 @@ def make_circle_dataset(
 
 
 def make_spiral_dataset(
-    num_samples=10000,
-    noise_std=0.01,
-    seed=123
+    num_samples: int = 10000,
+    noise_std: float = 0.01,
+    seed: int = 123,
 ) -> TensorPair:
     set_seed(seed)
     def spiral(n, delta):
@@ -84,18 +108,40 @@ def make_spiral_dataset(
     
     X = (X - X.mean(0)) / X.std(0)
     
-    return X, y
+    return X, y.reshape(-1, 1)
 
 
 def make_xor_dataset(
-    num_samples=10000,
-    noise_std=0.01,
-    seed=123
+    num_samples: int = 10000,
+    noise_std: float = 0.01,
+    seed: int = 123,
+    margin: float = 0.0, 
 ) -> TensorPair:
     set_seed(seed)
-    X = torch.rand(num_samples, 2) * 2 - 1
-    y = torch.where((X[:, 0] * X[:, 1]) > 0, 1., -1.).reshape(-1, 1)
+
+    half_margin = margin / 2.0
+    X_list = []
+    y_list = []
+    collected = 0
+
+    while collected < num_samples:
+        batch_size = num_samples - collected + int(0.2 * num_samples)
+        X_batch = torch.rand(batch_size, 2) * 2 - 1
+
+        valid_mask = (X_batch[:, 0].abs() > half_margin) & (X_batch[:, 1].abs() > half_margin)
+
+        X_valid = X_batch[valid_mask]
+        y_valid = torch.where((X_valid[:, 0] * X_valid[:, 1]) > 0, 1., -1.).reshape(-1, 1)
+        
+        X_list.append(X_valid)
+        y_list.append(y_valid)
+        collected += X_valid.size(0)
+
+    X = torch.cat(X_list, dim=0)[:num_samples]
+    y = torch.cat(y_list, dim=0)[:num_samples]
+
     if noise_std and noise_std > 0.0:
         X = X + torch.normal(0, noise_std, size=X.shape)
+        
     return X, y
 

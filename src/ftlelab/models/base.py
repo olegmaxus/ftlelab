@@ -116,7 +116,7 @@ class BaseNet(nn.Module):
             y = y[0]
 
         if y.ndim >= 2 and y.shape[-1] == 1:
-            return torch.sign(y)
+            return torch.where(y >= 0, 1.0, -1.0).squeeze(-1)
         return torch.argmax(y, dim=-1)
 
     def feature_from_module(self, x: torch.Tensor, target_module: nn.Module) -> torch.Tensor:

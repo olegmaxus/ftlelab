@@ -94,8 +94,8 @@ def compute_ftle_grid_both(
     """
     model.eval()
     N = grid.size(0)
-    vals1, vals2 = []
-    vals1, vals2 = [], []
+    vals_1, vals_2 = [], []
+
     rng = range(0, N, batch_size)
     if show_progress:
         rng = tqdm(rng, total=(N + batch_size - 1) // batch_size, desc="FTLE(k=1,2) grid")
@@ -103,11 +103,20 @@ def compute_ftle_grid_both(
     device = next(model.parameters()).device
     for i in rng:
         xb = grid[i : i + batch_size].to(device)
-        for j in range(xb.size(0)):
-            x = xb[j]
-            s1, v1, s2, v2 = top2_sigmas(model, x, layer_spec, cfg)
-            vals1.append(math.log(max(s1, eps)) / max(int(time_L), 1))
-            vals2.append(math.log(max(s2, eps)) / max(int(time_L), 1))
 
-    return torch.tensor(vals1, dtype=torch.float32, device="cpu"), \
-           torch.tensor(vals2, dtype=torch.float32, device="cpu")
+        s1_batch, s2_batch = top2_sigma_batch(model, xb, layer_spec=layer_spec, cfg=cfg)
+        
+        lam_1 = torch.log(torch.clamp(s1_batch, min=eps)) / max(int(time_L), 1)
+        lam_2 = torch.log(torch.clamp(s2_batch, min=eps)) / max(int(time_L), 1)
+
+        vals_1.append(lam_1.detach().cpu())
+        vals_2.append(lam_2.detach().cpu())
+
+    
+        # for j in range(xb.size(0)):
+        #     x = xb[j]
+        #     s1, v1, s2, v2 = top2_sigmas(model, x, layer_spec, cfg)
+        #     vals1.append(math.log(max(s1, eps)) / max(int(time_L), 1))
+        #     vals2.append(math.log(max(s2, eps)) / max(int(time_L), 1))
+
+    return torch.cat(vals_1, dim=0), torch.cat(vals_2, dim=0)

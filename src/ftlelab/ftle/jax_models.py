@@ -27,6 +27,8 @@ def dense_forward(
         "relu": jax.nn.relu,
         "gelu": jax.nn.gelu,
         "leaky_relu": jax.nn.leaky_relu,
+        "softplus": jax.nn.softplus,
+        "sigmoid": jax.nn.sigmoid,
         "identity": lambda z: z,
     }
     act = acts[activation]
@@ -60,6 +62,8 @@ def dense_hidden_k(
         "relu": jax.nn.relu,
         "gelu": jax.nn.gelu,
         "leaky_relu": jax.nn.leaky_relu,
+        "softplus": jax.nn.softplus,
+        "sigmoid": jax.nn.sigmoid,
         "identity": lambda z: z,
     }
     act = acts[activation]

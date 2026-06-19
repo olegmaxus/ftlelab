@@ -53,34 +53,82 @@ def make_circle_dataset(
     noise_std: float = 0.01, 
     seed: int = 123,
     margin: float = 0.0,
+    force_balanced: bool = True,
+    box_mode: str = "legacy" # "legacy" | "equal_area"
 ) -> TensorPair:
     set_seed(seed)
 
     half_margin = margin / 2.0
-    extent = 2.0 * radius
-    X_list = []
-    y_list = []
-    collected = 0
 
-    while collected < num_samples:
-        batch_size = num_samples - collected + int(0.2 * num_samples)
-        X_batch = (torch.rand(batch_size, 2) * 2 - 1) * extent
+    if box_mode == "legacy":
+        half_side = 2.0 * radius
+    elif box_mode == "equal_area":
+        half_side = 0.5 * math.sqrt(2 * math.pi) * radius
+    else:
+        raise ValueError(f"Invalid box_mode: {box_mode}, must be 'legacy' or 'equal_area")
 
-        distance = torch.linalg.norm(X_batch, dim=1)
 
-        inside_mask = distance < (radius - half_margin)
-        outside_mask = distance > (radius + half_margin)
-        valid_mask = inside_mask | outside_mask
+    def sample_region(n: int, region: str) -> torch.Tensor:
+        xs = []
+        collected = 0
 
-        X_valid = X_batch[valid_mask]
-        y_valid = torch.where(inside_mask[valid_mask],  1., -1.).reshape(-1, 1)
-        
-        X_list.append(X_valid)
-        y_list.append(y_valid)
-        collected += X_valid.size(0)
+        while collected < n:
+            batch_size = max(n - collected + int(0.2 * n), 256)
+            X = (torch.rand(batch_size, 2) * 2 - 1) * half_side
+            d = torch.linalg.norm(X, dim=1)
 
-    X = torch.cat(X_list, dim=0)[:num_samples]
-    y = torch.cat(y_list, dim=0)[:num_samples]
+            if region == "inside":
+                mask = d < (radius - half_margin)
+            elif region == "outside":
+                mask = d > (radius + half_margin)
+            else:
+                raise ValueError("region must be 'inside' or 'outside'.")
+
+            Xv = X[mask]
+            xs.append(Xv)
+            collected += Xv.size(0)
+
+        return torch.cat(xs, dim=0)[:n]
+    
+    if force_balanced:
+        n_pos = num_samples // 2
+        n_neg = num_samples - n_pos
+
+        X_pos = sample_region(n_pos, "inside")
+        X_neg = sample_region(n_neg, "outside")
+
+        y_pos = torch.ones(n_pos, 1)
+        y_neg = -torch.ones(n_neg, 1)
+
+        X = torch.cat([X_pos, X_neg], dim=0)
+        y = torch.cat([y_pos, y_neg], dim=0)
+
+        perm = torch.randperm(num_samples)
+        X, y = X[perm], y[perm]
+    else:
+        X_list = []
+        y_list = []
+        collected = 0
+
+        while collected < num_samples:
+            batch_size = num_samples - collected + int(0.2 * num_samples)
+            X_batch = (torch.rand(batch_size, 2) * 2 - 1) * half_side
+
+            distance = torch.linalg.norm(X_batch, dim=1)
+
+            inside_mask = distance < (radius - half_margin)
+            outside_mask = distance > (radius + half_margin)
+            valid_mask = inside_mask | outside_mask
+
+            X_valid = X_batch[valid_mask]
+            y_valid = torch.where(inside_mask[valid_mask],  1., -1.).reshape(-1, 1)
+            
+            X_list.append(X_valid)
+            y_list.append(y_valid)
+            collected += X_valid.size(0)
+
+        X = torch.cat(X_list, dim=0)[:num_samples]
+        y = torch.cat(y_list, dim=0)[:num_samples]
 
     if noise_std and noise_std > 0.0:
         X = X + torch.normal(0, noise_std, size=X.shape)

@@ -32,9 +32,9 @@ PARAM_MODULES = (
 
 @dataclass
 class FTLEConfig:
-    model_type: str = "dense",
-    activation: str = "tanh",
-    output_activation: str = "tanh",
+    model_type: str = "dense"
+    activation: str = "tanh"
+    output_activation: str = "tanh"
 
     # Grid of INPUT points: shape (N, d), numpy array
     grid_X: Any = None

@@ -1,12 +1,18 @@
+import os, re, json
+
 import torch
 import torch.nn as nn
-import os, re
-from dataclasses import asdict
 from torch.utils.data import DataLoader
+
+import numpy as np
+import jax
 from tqdm import tqdm
+from dataclasses import asdict
 
 from ..utils import device_string
 from .config import TrainConfig, LOSS_MAP, OPTIMIZER_MAP, PARAM_MODULES
+from ..ftle.jax_transfer import pytorch_dense_to_jax_params
+from ..ftle.jax_core import ftle_field_batched_between
 from .metrics import (
     binary_accuracy,
     multiclass_accuracy,
@@ -61,6 +67,7 @@ class Trainer:
             "val_loss": [],
             "val_metric": [],
             "val_metric_name": self._metric_name(),
+            "stop_reason": None,
         }
 
         if self.cfg.task == "vae":
@@ -248,72 +255,14 @@ class Trainer:
 
         raise ValueError(f"Unknown task: {self.cfg.task}")
 
-    # def _compute_loss_and_metric(self, outputs, targets, inputs):
-    #     """
-    #     Returns:
-    #         loss, metric_value, extra_dict
-    #     """
 
-    #     # ---------------- binary classification ----------------
-    #     if self.cfg.task == "binary":
-    #         logits = outputs
-
-    #         if self.cfg.loss == "bce_logits":
-    #             y = targets.float()
-    #             loss = self.criterion(logits.squeeze(-1), y.squeeze(-1))
-    #             pred = (logits.squeeze(-1) >= 0).float()
-    #             metric = (pred == y.squeeze(-1)).float().mean().item()
-
-    #         elif self.cfg.loss == "mse":
-    #             y = targets.float()
-    #             loss = self.criterion(logits, y)
-    #             pred = torch.sign(logits)
-    #             metric = (pred == torch.sign(y)).float().mean().item()
-
-    #         else:
-    #             raise ValueError("For binary task use loss='mse' or 'bce_logits'.")
-
-    #         return loss, metric, {}
-
-    #     # ---------------- multiclass classification ----------------
-    #     if self.cfg.task == "multiclass":
-    #         logits = outputs
-    #         y = targets.long().view(-1)
-    #         loss = self.criterion(logits, y)
-    #         pred = logits.argmax(dim=-1)
-    #         metric = (pred == y).float().mean().item()
-    #         return loss, metric, {}
-
-    #     # ---------------- autoencoder ----------------
-    #     if self.cfg.task == "autoencoder":
-    #         recon = outputs[0] if isinstance(outputs, tuple) else outputs
-    #         target = inputs if self.cfg.target_from_input or targets is None else targets
-    #         loss = self.criterion(recon, target)
-    #         metric = loss.item()  # reconstruction loss
-    #         return loss, metric, {}
-
-    #     # ---------------- VAE ----------------
-    #     if self.cfg.task == "vae":
-    #         if not isinstance(outputs, (tuple, list)) or len(outputs) < 3:
-    #             raise ValueError("VAE task expects model to return (recon, mu, logvar).")
-
-    #         recon, mu, logvar = outputs[:3]
-    #         target = inputs if self.cfg.target_from_input or targets is None else targets
-
-    #         recon_loss = self.criterion(recon, target)
-    #         kl_loss = -0.5 * torch.mean(
-    #             torch.sum(1 + logvar - mu.pow(2) - logvar.exp(), dim=1)
-    #         )
-    #         loss = recon_loss + self.cfg.beta * kl_loss
-    #         metric = recon_loss.item()
-
-    #         return loss, metric, {
-    #             "recon_loss": recon_loss.item(),
-    #             "kl_loss": kl_loss.item(),
-    #         }
-
-    #     raise ValueError(f"Unknown task: {self.cfg.task}")
-
+    def _target_accuracy_reached(self, val_metric: float) -> bool:
+        if self.cfg.task not in ("binary", "multiclass"):
+            return False
+        if self.cfg.target_val_acc is None:
+            return False
+        return val_metric >= float(self.cfg.target_val_acc)
+    
     # ============================================================
     # Train / validate
     # ============================================================
@@ -324,7 +273,7 @@ class Trainer:
 
         iterator = tqdm(
             train_loader,
-            desc=f"Epoch {self.current_epoch+1}/{self.cfg.epochs} [Training]"
+            desc=f"Epoch {self.current_epoch+1}/{self.cfg.max_epochs} [Training]"
         ) if ((self.current_epoch + 1) % self.cfg.print_every == 0 or (self.current_epoch + 1) == self.cfg.epochs) else train_loader
 
         for batch in iterator:
@@ -350,7 +299,7 @@ class Trainer:
 
         iterator = tqdm(
             val_loader,
-            desc=f"Epoch {self.current_epoch+1}/{self.cfg.epochs} [Validation]"
+            desc=f"Epoch {self.current_epoch+1}/{self.cfg.max_epochs} [Validation]"
         ) if ((self.current_epoch + 1) % self.cfg.print_every == 0 or (self.current_epoch + 1) == self.cfg.epochs) else val_loader
 
         with torch.no_grad():
@@ -392,13 +341,138 @@ class Trainer:
         torch.save(state, filepath)
 
     # ============================================================
+    # FTLEs
+    # ============================================================
+
+    def _ftle_enabled(self) -> bool:
+        return bool(self.cfg.compute_ftle and self.cfg.ftle_config is not None)
+    
+    def _should_ftle_be_computed_this_epoch(self) -> bool:
+        if not self._ftle_enabled():
+            return False
+        ep = self.current_epoch + 1
+        start = max(1, int(self.cfg.ftle_start))
+        return ep >= start and ((ep - start) % int(self.cfg.ftle_every) == 0)
+    
+    def _spec_to_name(self, spec):
+        if spec == "input":
+            return "input"
+        if spec == "output":
+            return "output"
+        if isinstance(spec, tuple) and spec[0] == "hidden_k":
+            return f"hidden-{int(spec[1])}"
+        raise ValueError(f"usupported layer spec: {spec}")
+    
+    def _resolve_ftle_pairs(self):
+        ftle_cfg = self.cfg.ftle_config
+
+        # explicit transitions take priority
+        if ftle_cfg.layer_pairs:
+            return list(ftle_cfg.layer_pairs)
+        
+        # dense-only auto mode for now
+        if ftle_cfg.model_type != "dense":
+            raise NotImplementedError("Auto FTLE pair resolution currently supports only dense models.")
+
+        if not hasattr(self.model, "hidden_depth"):
+            raise RuntimeError("Model does not expose self.hidden_depth required for auto FTLE layer resolution.")
+
+        hidden_depth = int(self.model.hidden_depth)
+
+        # all input -> every hidden + output
+        if ftle_cfg.layers == "all":
+            pairs = [("input", ("hidden_k", k)) for k in range(1, hidden_depth + 1)]
+            pairs.append(("input", "output"))
+            return pairs
+
+        # selected input -> layers
+        pairs = []
+        for item in ftle_cfg.layers:
+            if item == "output":
+                pairs.append(("input", "output"))
+            elif isinstance(item, int):
+                pairs.append(("input", ("hidden_k", item)))
+            elif isinstance(item, tuple):
+                pairs.append(("input", item))
+            else:
+                raise ValueError(f"Unsupported FTLE layer selector: {item}")
+        return pairs
+    
+
+    def _compute_and_save_ftle_jax(self):
+        ftle_cfg = self.cfg.ftle_config
+        if ftle_cfg.grid_X is None:
+            raise ValueError("ftle_config.grid_X must be provided for FTLE evaluation.")
+
+        if ftle_cfg.save_format != "npy":
+            raise ValueError("For the JAX backend, save_format must currently be 'npy'.")
+
+        jax.config.update("jax_enable_x64", bool(ftle_cfg.enable_x64))
+
+        self.model.eval()
+        params = pytorch_dense_to_jax_params(self.model)
+        pairs = self._resolve_ftle_pairs()
+
+        epoch_num = self.current_epoch + 1
+        epoch_dir = os.path.join(
+            self.cfg.save_dir,
+            ftle_cfg.save_subdir,
+            self.cfg.model_name,
+            f"epoch_{epoch_num:04d}",
+        )
+        os.makedirs(epoch_dir, exist_ok=True)
+
+        snapshot = {
+            "epoch": epoch_num,
+            "backend": "jax",
+            "files": {},
+        }
+
+        for start_spec, end_spec in pairs:
+            arr = ftle_field_batched_between(
+                model_type=ftle_cfg.model_type,
+                params=params,
+                X_np=np.asarray(ftle_cfg.grid_X),
+                start_layer_spec=start_spec,
+                end_layer_spec=end_spec,
+                time_L=None,  # auto = layer distance
+                batch_size=ftle_cfg.batch_size,
+                activation=ftle_cfg.activation,
+                output_activation=ftle_cfg.output_activation,
+                exact_if_dim_le=ftle_cfg.exact_if_dim_le,
+                max_steps=ftle_cfg.max_steps,
+                tol=ftle_cfg.tol,
+                dtype=ftle_cfg.dtype,
+            )
+
+            fname = f"{self._spec_to_name(start_spec)}__to__{self._spec_to_name(end_spec)}.npy"
+            fpath = os.path.join(epoch_dir, fname)
+            np.save(fpath, arr)
+            snapshot["files"][f"{start_spec}->{end_spec}"] = fpath
+
+        meta_path = os.path.join(epoch_dir, "meta.json")
+        with open(meta_path, "w") as f:
+            json.dump(snapshot, f, indent=2, default=str)
+
+        self.history.setdefault("ftle_snapshots", []).append(snapshot)
+
+    
+    def _maybe_compute_ftle(self):
+        if not self._should_ftle_be_computed_this_epoch():
+            return
+        if self.cfg.ftle_backend.lower() != "jax":
+            raise NotImplementedError("Only Jax FTLE backend is implemented for now.")
+
+        self._compute_and_save_ftle_jax()
+
+    # ============================================================
     # Main loop
     # ============================================================
 
     def train(self, train_loader: DataLoader, val_loader: DataLoader):
         print("Training started...")
 
-        for epoch in range(self.cfg.epochs):
+        for epoch in range(self.cfg.max_epochs):
             self.current_epoch = epoch
 
             train_loss = self._train_one_epoch(train_loader)
@@ -412,9 +486,9 @@ class Trainer:
                 self.history["val_recon_loss"].append(extras.get("recon_loss", float("nan")))
                 self.history["val_kl_loss"].append(extras.get("kl_loss", float("nan")))
 
-            if (self.current_epoch + 1) % self.cfg.print_every == 0 or (self.current_epoch + 1) == self.cfg.epochs:
+            if (self.current_epoch + 1) % self.cfg.print_every == 0 or (self.current_epoch + 1) == self.cfg.max_epochs:
                 msg = (
-                    f"Epoch {epoch+1}/{self.cfg.epochs} | "
+                    f"Epoch {epoch+1}/{self.cfg.max_epochs} | "
                     f"Train Loss: {train_loss:.4f} | "
                     f"Val Loss: {val_loss:.4f} | "
                     f"Val {self.history['val_metric_name']}: {val_metric:.4f}"
@@ -430,6 +504,22 @@ class Trainer:
                     print(f"Validation loss improved from {self.best_val_loss:.4f} to {val_loss:.4f}. Saving best model.")
                 self.best_val_loss = val_loss
                 self.save_checkpoint(is_best=True)
+
+            # FTLE evaluation
+            self._maybe_compute_ftle()
+
+            # Stop if target accuracy is reached:
+            if self._target_accuracy_reached(val_metric):
+                print(
+                    f"Target validation accuracy {self.cfg.target_val_acc:.4f} "
+                    f"reached at epoch {self.current_epoch + 1} "
+                    f"(got {val_metric:.4f})."
+                )
+                self.history["stop_reason"] = "target_val_acc_reached"
+                break
+        
+        if self.history["stop_reason"] is None:
+            self.history["stop_reason"] = "max_epochs_reached"
 
         print("Training finished.")
         return self.history

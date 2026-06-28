@@ -193,3 +193,55 @@ def make_xor_dataset(
         
     return X, y
 
+
+def make_sphere_dataset(
+    num_samples: int = 10000,
+    radius: float = 1.0,
+    dim: int = 3,
+    noise_std: float = 0.02,
+    distribution: str = "surface",
+    seed: int = 123,
+    shuffle: bool = True,
+) -> torch.Tensor:
+    """
+    Sample points from a d-dimensional ball for autoencoder experiments.
+
+    distribution:
+      - "surface": uniform on the sphere shell (a thin 2D manifold in 3D)
+      - "solid":   uniform inside the ball
+      - "shell":   uniform in an annulus [0.8r, r]
+    """
+    if seed is not None:
+        set_seed(seed)
+
+    if dim < 2:
+        raise ValueError("dim must be >= 2.")
+
+    distribution = distribution.lower()
+    if distribution not in {"surface", "solid", "shell"}:
+        raise ValueError("distribution must be 'surface', 'solid', or 'shell'.")
+
+    if distribution == "surface":
+        X = torch.randn(num_samples, dim)
+        X = X / torch.linalg.norm(X, dim=1, keepdim=True).clamp_min(1e-12)
+        X = radius * X
+    elif distribution == "solid":
+        X = torch.randn(num_samples, dim)
+        dirs = X / torch.linalg.norm(X, dim=1, keepdim=True).clamp_min(1e-12)
+        u = torch.rand(num_samples, 1) ** (1.0 / dim)
+        X = radius * u * dirs
+    else:
+        X = torch.randn(num_samples, dim)
+        dirs = X / torch.linalg.norm(X, dim=1, keepdim=True).clamp_min(1e-12)
+        u = torch.rand(num_samples, 1)
+        radii = radius * (0.8 + 0.2 * u)
+        X = radii * dirs
+
+    if noise_std and noise_std > 0.0:
+        X = X + torch.randn_like(X) * noise_std
+
+    if shuffle:
+        X = X[torch.randperm(X.size(0))]
+
+    return X
+

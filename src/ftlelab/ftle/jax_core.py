@@ -6,7 +6,14 @@ import jax
 import jax.numpy as jnp
 from tqdm.auto import tqdm
 
-from .jax_models import dense_forward, dense_hidden_k, dense_map_between, _layer_depth_index
+from .jax_models import (
+    dense_forward,
+    dense_hidden_k,
+    dense_map_between,
+    ae_map_between,
+    layer_depth_index,
+    _layer_depth_index,
+)
 
 
 # ============================================================
@@ -59,7 +66,53 @@ def build_feature_fn_jax(
     elif model_type == "conv":
         ...
     elif model_type == "autoencoder":
-        ...
+        if layer_spec == "input":
+            return lambda x: x
+        if layer_spec == "output":
+            return lambda x: ae_map_between(
+                params,
+                x,
+                start_layer_spec="input",
+                end_layer_spec="output",
+                activation=activation,
+                output_activation=output_activation,
+            )
+        if layer_spec == "latent":
+            return lambda x: ae_map_between(
+                params,
+                x,
+                start_layer_spec="input",
+                end_layer_spec="latent",
+                activation=activation,
+                output_activation=output_activation,
+            )
+        if isinstance(layer_spec, tuple):
+            name, k = layer_spec[0], int(layer_spec[1])
+            if name == "encoder_hidden_k":
+                end_spec = ("encoder_hidden_k", k)
+                return lambda x: ae_map_between(
+                    params,
+                    x,
+                    start_layer_spec="input",
+                    end_layer_spec=end_spec,
+                    activation=activation,
+                    output_activation=output_activation,
+                )
+            if name == "decoder_hidden_k":
+                end_spec = ("decoder_hidden_k", k)
+                return lambda x: ae_map_between(
+                    params,
+                    x,
+                    start_layer_spec="input",
+                    end_layer_spec=end_spec,
+                    activation=activation,
+                    output_activation=output_activation,
+                )
+
+        raise ValueError(
+            "For model_type='autoencoder', layer_spec must be "
+            "'input', 'latent', 'output', ('encoder_hidden_k', k), or ('decoder_hidden_k', k)."
+        )
     elif model_type == "vae":
         ...
 
@@ -77,6 +130,16 @@ def build_transition_fn_jax(
 ) -> Callable[[jnp.ndarray], jnp.ndarray]:
     if model_type == "dense":
         return lambda z: dense_map_between(
+            params,
+            z,
+            start_layer_spec=start_layer_spec,
+            end_layer_spec=end_layer_spec,
+            activation=activation,
+            output_activation=output_activation,
+        )
+
+    if model_type == "autoencoder":
+        return lambda z: ae_map_between(
             params,
             z,
             start_layer_spec=start_layer_spec,
@@ -267,10 +330,10 @@ def _get_feature_batch_fn(
             output_activation=output_activation,
         )
 
-    def feature_single(x):
-        return f(x.astype(jax_dtype))
-    
-    _FEATURE_JIT_CACHE[cache_key] = jax.jit(jax.vmap(feature_single, in_axes=0))
+        def feature_single(x):
+            return f(x.astype(jax_dtype))
+
+        _FEATURE_JIT_CACHE[cache_key] = jax.jit(jax.vmap(feature_single, in_axes=0))
 
     return _FEATURE_JIT_CACHE[cache_key]
 
@@ -430,22 +493,20 @@ def ftle_field_batched_between(
     tol: float = 1e-6,
     dtype: str = "float32",
 ) -> np.ndarray:
+    """
+    Compute FTLE for the transition start_layer_spec -> end_layer_spec.
+
+    X_np must contain points expressed in the coordinate system of
+    start_layer_spec (input space when start is "input", latent space when
+    start is "latent", etc.).
+    """
     if dtype not in ("float32", "float64"):
         raise ValueError("dtype must be 'float32' or 'float64'.")
     jax_dtype = jnp.float64 if dtype == "float64" else jnp.float32
 
     if time_L is None:
-        time_L = _layer_depth_index(params, end_layer_spec) - \
-                 _layer_depth_index(params, start_layer_spec)
-        
-    feature_batch = _get_feature_batch_fn(
-        model_type=model_type,
-        params=params,
-        layer_spec=start_layer_spec,
-        activation=activation,
-        output_activation=output_activation,
-        jax_dtype=jax_dtype,
-    )
+        time_L = layer_depth_index(model_type, params, end_layer_spec) - \
+                 layer_depth_index(model_type, params, start_layer_spec)
 
     ftle_batch = _get_ftle_batch_fn(
         model_type=model_type,
@@ -466,13 +527,7 @@ def ftle_field_batched_between(
 
     for start in tqdm(range(0, N, batch_size), desc="FTLE (JAX)"):
         end = min(start + batch_size, N)
-        X_batch = jnp.asarray(X_np[start:end], dtype=jax_dtype)
-
-        if start_layer_spec == "input":
-            Z_batch = X_batch
-        else:
-            Z_batch = feature_batch(X_batch)
-
+        Z_batch = jnp.asarray(X_np[start:end], dtype=jax_dtype)
         lam_batch = np.array(ftle_batch(Z_batch, time_L))
         out[start:end] = lam_batch.astype(out_dtype)
 
@@ -508,47 +563,3 @@ def ftle_field_batched(
         tol=tol,
         dtype=dtype,
     )
-
-# def ftle_field_batched(
-#     model_type,
-#     params,
-#     X_np: np.ndarray,     # (N, d), numpy
-#     layer_spec,
-#     time_L: int,
-#     batch_size: int = 1024,
-#     activation: str = "tanh",
-#     output_activation: str = "tanh",
-#     exact_if_dim_le: int = 4,
-#     max_steps: int = 50,
-#     tol: float = 1e-6,
-#     dtype: str = "float32", # float32 or float64
-# ) -> np.ndarray:
-#     """
-#     Compute FTLE over X_np in batches, showing tqdm progress.
-
-#     Caller is responsible for setting jax.config.update("jax_enable_x64", ...)
-#     before the first call if float64 is needed.
-
-#     Returns FTLE values as a numpy array of shape (N,).
-#     """
-#     if dtype not in ("float32", "float64"):
-#         raise ValueError("dtype must be 'float32' or 'float64'.")
-#     jax_dtype = jnp.float64 if dtype == "float64" else jnp.float32
-
-#     ftle_batch = _get_ftle_batch_fn(
-#         model_type=model_type, params=params,
-#         layer_spec=layer_spec, activation=activation,
-#         output_activation=output_activation, exact_if_dim_le=exact_if_dim_le,
-#         max_steps=max_steps, tol=tol, jax_dtype=jax_dtype,
-#     )    
-
-#     N = X_np.shape[0]
-#     out = np.empty((N,), dtype=np.float32)
-
-#     for start in tqdm(range(0, N, batch_size), desc="FTLE (JAX)"):
-#         end = min(start + batch_size, N)
-#         X_batch = jnp.asarray(X_np[start:end], dtype=jax_dtype)      # (B, d)
-#         lam_batch = np.array(ftle_batch(X_batch, time_L))  # back to numpy
-#         out[start:end] = lam_batch.astype(np.float32)
-
-#     return out

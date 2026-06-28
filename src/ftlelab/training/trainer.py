@@ -274,7 +274,7 @@ class Trainer:
         iterator = tqdm(
             train_loader,
             desc=f"Epoch {self.current_epoch+1}/{self.cfg.max_epochs} [Training]"
-        ) if ((self.current_epoch + 1) % self.cfg.print_every == 0 or (self.current_epoch + 1) == self.cfg.epochs) else train_loader
+        ) if ((self.current_epoch + 1) % self.cfg.print_every == 0 or (self.current_epoch + 1) == self.cfg.max_epochs) else train_loader
 
         for batch in iterator:
             inputs, targets = self._unpack_batch(batch)
@@ -300,7 +300,7 @@ class Trainer:
         iterator = tqdm(
             val_loader,
             desc=f"Epoch {self.current_epoch+1}/{self.cfg.max_epochs} [Validation]"
-        ) if ((self.current_epoch + 1) % self.cfg.print_every == 0 or (self.current_epoch + 1) == self.cfg.epochs) else val_loader
+        ) if ((self.current_epoch + 1) % self.cfg.print_every == 0 or (self.current_epoch + 1) == self.cfg.max_epochs) else val_loader
 
         with torch.no_grad():
             for batch in iterator:
@@ -500,7 +500,7 @@ class Trainer:
             self.save_checkpoint(is_best=False)
 
             if val_loss < self.best_val_loss:
-                if (self.current_epoch + 1) % self.cfg.print_every == 0 or (self.current_epoch + 1) == self.cfg.epochs:
+                if (self.current_epoch + 1) % self.cfg.print_every == 0 or (self.current_epoch + 1) == self.cfg.max_epochs:
                     print(f"Validation loss improved from {self.best_val_loss:.4f} to {val_loss:.4f}. Saving best model.")
                 self.best_val_loss = val_loss
                 self.save_checkpoint(is_best=True)

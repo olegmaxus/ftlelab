@@ -35,6 +35,33 @@ def make_dataloaders(
     return loaders
 
 
+def make_feature_dataloaders(
+    splits: Dict[str, torch.Tensor],
+    batch_size: int = 256,
+    shuffle_train: bool = True,
+    drop_last: bool = False,
+    num_workers: int = 0,
+) -> Dict[str, DataLoader]:
+    """
+    Turn a {train,val,test} split dict of feature tensors into DataLoaders.
+    Each batch is a single tensor (x,) suitable for autoencoder training.
+    """
+    loaders: Dict[str, DataLoader] = {}
+
+    for split_name, X in splits.items():
+        ds = TensorDataset(X)
+        shuffle = shuffle_train if split_name == "train" else False
+        loaders[split_name] = DataLoader(
+            ds,
+            batch_size=batch_size,
+            shuffle=shuffle,
+            drop_last=drop_last if split_name == "train" else False,
+            num_workers=num_workers,
+        )
+
+    return loaders
+
+
 @dataclass
 class MNISTWrapper:
     """
